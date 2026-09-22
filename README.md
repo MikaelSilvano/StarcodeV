@@ -1,1 +1,1 @@
-# StarcodeCUDA
+# StarcodeV
