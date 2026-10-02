@@ -1,18 +1,30 @@
 /*
 ** autocal.h -- automatic tau selection for StarcodeV, WITHOUT ground truth.
 **
-** C mirror of autocal.py (the validated reference; see
-** CORRECTNESS_REPORT_GENERALIZATION.md: 100% purity on 11/11 synthetic
-** regimes, passes the 3-permutation determinism test). See the long
-** comment block in autocal.py for the full story of the problem (a fixed
-** tau overfits) and the solution (the bimodal separability gap in the
-** consensus-to-consensus distance histogram).
+** The problem: a fixed tau overfits to one dataset. The solution used here:
+** the consensus-to-consensus distance histogram is bimodal (pairs of the same
+** oligo close together, pairs of different oligos far apart), and the empty
+** gap between the two modes gives a safe ceiling for tau.
 **
-** DETERMINISM (identical to the Python version): no RNG, no
+** DETERMINISM: no RNG, no
 ** floating-point reduction anywhere on the decision path (the only double
 ** is MARGIN, used right before it gets rounded to an int), no dependency
-** on input order. The gap is chosen as the LONGEST empty gap, with the
-** smallest starting index as the tie-breaker.
+** on input order.
+**
+** REVISION 2 (gap rule). The original rule took the LONGEST empty run of the
+** histogram anywhere in [1, dmax]. On the real Microsoft nanopore data that
+** rule fails twice over: the histogram starts with an empty run at d = 1..3
+** (no two consensus sequences are that close), and its sparse right tail has
+** an empty run at d = 43..47 that is longer than the true 21..23 gap, so the
+** old rule reported ceiling = 48. The revised rule anchors on the PEAK of the
+** histogram, which lies in the different-oligo mode because unrelated
+** consensus pairs outnumber same-oligo pairs, and walks LEFT from the peak to
+** the first empty run of at least CAL_MIN_GAP bins. The ceiling is the first
+** occupied bin to the right of that run. If the walk reaches d = 1 without
+** meeting such a run, the ceiling is the smallest observed distance (the
+** data show no same-oligo mode, e.g. when nothing is fragmented). Tail gaps
+** to the right of the peak can no longer be selected, and single empty bins
+** inside a mode are ignored.
 */
 #ifndef _AUTOCAL_HEADER
 #define _AUTOCAL_HEADER
@@ -20,22 +32,34 @@
 #include <stdint.h>
 #include "starcodev.h"
 
-#define CAL_MARGIN 0.25   /* safety margin below the ceiling */
+#define CAL_MARGIN  0.25  /* safety margin below the ceiling: tau = floor((ceiling-1)*(1-margin)) */
+#define CAL_MIN_GAP 2     /* an empty run must span >= this many bins to count as a separability gap */
 
 /* Pairwise edit-distance histogram over candidate consensus sequences
 ** (integer, deterministic). hist_out must be allocated by the caller with
 ** capacity >= dmax+2 -- call this once with hist_out=NULL to get dmax_out,
 ** then allocate, or use cal_estimate_dmax() to get dmax up front.
-** Returns 0 when ncons < 2 (no histogram, matching Python's None). */
+** Returns 0 when ncons < 2 (no histogram). */
 int32_t cal_estimate_dmax(const int32_t *cons_lens, int32_t ncons, double frac_dmax);
 
 int cal_distance_histogram(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
                             int32_t n_iter, int32_t sig_abs, int32_t dmax,
                             int64_t *hist_out /* size dmax+2 */);
 
-/* Returns 1 if a gap was found (gap_start_out/gap_len_out are filled), 0 otherwise. */
+/* DEPRECATED (revision 1 rule, kept only for comparison/regression): longest
+** empty run anywhere in [1, dmax]. Returns 1 if a run was found. */
 int cal_longest_gap(const int64_t *hist, int32_t dmax,
                      int32_t *gap_start_out, int32_t *gap_len_out);
+
+/* Revision 2 rule. Finds the peak bin (largest count, smallest d on ties),
+** then walks left to the first empty run of length >= min_gap. Fills
+** peak_out, gap_start_out/gap_len_out (0/0 when the leading-edge case
+** applies) and ceiling_out. kind_out: 1 = interior gap below the peak,
+** 2 = no such gap (ceiling = smallest observed distance). Returns 0 only if
+** the histogram is empty. */
+int cal_ceiling_below_peak(const int64_t *hist, int32_t dmax, int32_t min_gap,
+                            int32_t *peak_out, int32_t *gap_start_out, int32_t *gap_len_out,
+                            int32_t *ceiling_out, int *kind_out);
 
 typedef struct {
     int64_t *hist;      /* allocated; the caller frees it */
@@ -43,16 +67,18 @@ typedef struct {
     int32_t  gap_start;
     int32_t  gap_len;
     int32_t  ceiling;
+    int32_t  peak;      /* histogram peak (revision 2) */
+    int      kind;      /* 1 = interior gap below peak, 2 = leading edge (no same-oligo mode) */
+    int64_t  n_pairs;   /* candidate pairs counted in the histogram */
     int      has_gap;  /* 0 means "no gap found" */
 } cal_diagnostics_t;
 
 /* Pick tau for S3/S4 from the data alone. Returns 1 on success (tau_out
 ** and ceiling_out are filled), 0 if ncons < 2 or no gap was found
-** (tau_out/ceiling_out are set to -1 in that case, matching Python's
-** (None, None)). diag_out is optional (may be NULL); if it is provided,
+** (tau_out/ceiling_out are set to -1 in that case). diag_out is optional (may be NULL); if it is provided,
 ** the caller MUST free(diag_out->hist). */
 int cal_auto_tau(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
-                  double margin, int32_t n_iter,
+                  double margin, int32_t n_iter, int32_t sig_abs,
                   int32_t *tau_out, int32_t *ceiling_out, cal_diagnostics_t *diag_out);
 
 typedef struct {
@@ -61,8 +87,9 @@ typedef struct {
     double  frac_reads_in_cores;
 } cal_coverage_t;
 
-/* Pre-run diagnostic: fraction of reads that ended up inside a core
-** (as opposed to an orphan) after S1. */
+/* Diagnostic after S1, no ground truth needed: fraction of DISTINCT reads
+** that ended up inside a core (component with >= 2 distinct reads) rather
+** than as an orphan. Printed by starcodev_seq in verbose mode. */
 cal_coverage_t cal_core_coverage(const int32_t *labels_s1, int32_t n);
 
 #endif /* _AUTOCAL_HEADER */

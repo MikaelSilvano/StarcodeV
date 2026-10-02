@@ -1,6 +1,6 @@
 /*
-** autocal.c -- see autocal.h and the long comment block in autocal.py
-** (the reference implementation) for the full problem/solution story.
+** autocal.c -- see autocal.h for what the gap rule does and why the earlier
+** longest-gap rule was replaced.
 */
 #include "autocal.h"
 #include "pairgen.h"
@@ -58,7 +58,7 @@ static int cal_set_add(cal_u64set_t *s, uint64_t key) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Mirrors np.median: odd n -> the middle element; even n -> the average of
+/* Median: odd n -> the middle element; even n -> the average of
 ** the two middle elements. */
 static double median_len(const int32_t *lens, int32_t n) {
     int32_t *tmp = (int32_t *)malloc((size_t)n * sizeof(int32_t));
@@ -139,33 +139,63 @@ int cal_longest_gap(const int64_t *hist, int32_t dmax,
     return 1;
 }
 
+
+int cal_ceiling_below_peak(const int64_t *hist, int32_t dmax, int32_t min_gap,
+                            int32_t *peak_out, int32_t *gap_start_out, int32_t *gap_len_out,
+                            int32_t *ceiling_out, int *kind_out) {
+    int32_t peak = -1; int64_t best = 0;
+    for (int32_t d = 1; d <= dmax; d++)
+        if (hist[d] > best) { best = hist[d]; peak = d; }   /* strict '>' -> smallest d on ties */
+    if (peak < 0) return 0;
+    if (min_gap < 1) min_gap = 1;
+    int32_t run = 0;
+    for (int32_t d = peak - 1; d >= 1; d--) {
+        if (hist[d] == 0) { run++; continue; }
+        if (run >= min_gap) {                     /* occupied bin d closes an empty run d+1..d+run */
+            *peak_out = peak; *gap_start_out = d + 1; *gap_len_out = run;
+            *ceiling_out = d + run + 1; *kind_out = 1;
+            return 1;
+        }
+        run = 0;
+    }
+    /* reached d = 1: no same-oligo mode below the peak; ceiling = smallest observed distance */
+    int32_t first = peak;
+    for (int32_t d = 1; d <= peak; d++) if (hist[d] > 0) { first = d; break; }
+    *peak_out = peak; *gap_start_out = 0; *gap_len_out = 0;
+    *ceiling_out = first; *kind_out = 2;
+    return 1;
+}
+
 int cal_auto_tau(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
-                  double margin, int32_t n_iter,
+                  double margin, int32_t n_iter, int32_t sig_abs,
                   int32_t *tau_out, int32_t *ceiling_out, cal_diagnostics_t *diag_out) {
     if (diag_out) memset(diag_out, 0, sizeof(*diag_out));
     if (ncons < 2) { *tau_out = -1; *ceiling_out = -1; return 0; }
 
     int32_t dmax = cal_estimate_dmax(cons_lens, ncons, 0.5);
     int64_t *hist = (int64_t *)malloc((size_t)(dmax + 2) * sizeof(int64_t));
-    cal_distance_histogram(cons, cons_lens, ncons, n_iter, SV_SIG_ABS, dmax, hist);
+    cal_distance_histogram(cons, cons_lens, ncons, n_iter, sig_abs, dmax, hist);
+    int64_t npairs = 0;
+    for (int32_t d = 0; d <= dmax; d++) npairs += hist[d];
 
-    int32_t gap_start, gap_len;
-    int found = cal_longest_gap(hist, dmax, &gap_start, &gap_len);
+    int32_t peak = -1, gap_start = 0, gap_len = 0, ceiling = -1; int kind = 0;
+    int found = cal_ceiling_below_peak(hist, dmax, CAL_MIN_GAP, &peak, &gap_start, &gap_len, &ceiling, &kind);
     if (!found) {
         *tau_out = -1; *ceiling_out = -1;
-        if (diag_out) { diag_out->hist = hist; diag_out->dmax = dmax; diag_out->has_gap = 0; }
+        if (diag_out) { diag_out->hist = hist; diag_out->dmax = dmax; diag_out->has_gap = 0; diag_out->n_pairs = npairs; }
         else free(hist);
         return 0;
     }
-    int32_t ceiling = gap_start + gap_len;
     int32_t tau = (int32_t)((double)(ceiling - 1) * (1.0 - margin));
     if (tau < 2) tau = 2;
+    if (tau > ceiling - 1) tau = ceiling - 1;   /* never at or above the ceiling */
 
     *tau_out = tau; *ceiling_out = ceiling;
     if (diag_out) {
         diag_out->hist = hist; diag_out->dmax = dmax;
         diag_out->gap_start = gap_start; diag_out->gap_len = gap_len;
-        diag_out->ceiling = ceiling; diag_out->has_gap = 1;
+        diag_out->ceiling = ceiling; diag_out->peak = peak; diag_out->kind = kind;
+        diag_out->n_pairs = npairs; diag_out->has_gap = (kind == 1);
     } else {
         free(hist);
     }

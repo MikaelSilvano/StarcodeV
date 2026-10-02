@@ -6,15 +6,14 @@
 #   make test       build, then run the built-in smoke test (5 lines)
 #   make clean      remove object files and the binary
 #
-# There is NO GPU/CUDA target in this Makefile -- see the separate
-# starcode-gpu package for that (CONVENTIONS_STARCODEV.md §0).
+# This Makefile builds the sequential program only (no CUDA).
 
 CC       ?= gcc
 CFLAGS   ?= -O2 -std=gnu99 -Wall -Wextra
 LDFLAGS  ?=
 LDLIBS   := -lm
 
-SRC_SEQ  := pairgen.c starcodev.c autocal.c output_writer.c main-starcodev.c
+SRC_SEQ  := pairgen.c starcodev.c autocal.c exactcons.c output_writer.c main-starcodev.c
 OBJ_SEQ  := $(SRC_SEQ:.c=.o)
 BIN_SEQ  := starcodev_seq
 
@@ -36,8 +35,9 @@ $(BIN_SEQ): $(OBJ_SEQ)
 pairgen.o: pairgen.c pairgen.h
 starcodev.o: starcodev.c starcodev.h pairgen.h
 autocal.o: autocal.c autocal.h starcodev.h pairgen.h
+exactcons.o: exactcons.c exactcons.h starcodev.h
 output_writer.o: output_writer.c output_writer.h starcodev.h
-main-starcodev.o: main-starcodev.c starcodev.h pairgen.h autocal.h output_writer.h
+main-starcodev.o: main-starcodev.c starcodev.h pairgen.h autocal.h exactcons.h output_writer.h
 
 test: seq
 	@printf 'AAAACCCCGGGGTTTT\t3\nAAAACCCCGGGGTTTA\t2\nTTTTGGGGCCCCAAAA\t5\nTTTTGGGGCCCCAAAT\t1\nGATTACAGATTACAGA\t4\n' > /tmp/starcodev_smoke.txt

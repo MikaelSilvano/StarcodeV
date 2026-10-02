@@ -1,12 +1,10 @@
 /*
 ** starcodev.c -- see starcodev.h and CONVENTIONS_STARCODEV.md.
 **
-** Every public function mirrors the Python function of the same name
-** (minus the sv_ prefix) in starcodev.py. correctness_c_vs_python.csv
-** verifies the two implementations agree on the final result; the
-** tie-break notes in the comments explain why a particular ordering was
-** chosen whenever the Python reference itself happens to depend on dict
-** iteration order (see consensus_from_anchor / the K3 insertion rule).
+** S1 to S4, union-find and the canonical partition. Wherever two choices
+** tie (medoid, vote, absorption target) the rule is fixed and documented
+** next to the code (K1-K5 in CONVENTIONS_STARCODEV.md), so the result does
+** not depend on input order or on the order in which pairs are visited.
 */
 #include "starcodev.h"
 #include "pairgen.h"
@@ -26,7 +24,7 @@ static inline int base_idx(char c) {
 
 /* ================================================================== u64set
 ** A small open-addressing hash set for deduplicating pairs (i<<32)|j,
-** reused by S1/S3/S4 in place of Python's `seen = set()`. Deterministic:
+** reused by S1/S3/S4 to skip pairs that were already checked. Deterministic:
 ** it's only ever used to SKIP redundant work, never to influence the
 ** actual decision order (unions/absorptions still go through the combined
 ** K1/K5 keys). */
@@ -210,7 +208,7 @@ int32_t sv_levenshtein(const char *a, int32_t la, const char *b, int32_t lb,
 
 /* ================================================================== STAGE 1 */
 void sv_s1_cores(const char *const *seqs, const int32_t *lens, int32_t n,
-                  int32_t tau_core, int32_t n_iter, int32_t theta,
+                  int32_t tau_core, int32_t n_iter, int32_t theta, int32_t anchor_occ,
                   int32_t *lab_out, sv_work_t *work_out, int32_t *iters_done_out) {
     pg_encoded_t enc;
     pg_encode(seqs, lens, n, &enc);
@@ -224,12 +222,19 @@ void sv_s1_cores(const char *const *seqs, const int32_t *lens, int32_t n,
     u64set_init(&seen, 4096);
 
     sv_work_t work = {0, 0, 0, 0};
-    uint64_t *keys = (uint64_t *)malloc((size_t)n * sizeof(uint64_t));
+    if (anchor_occ < 1) anchor_occ = 1;
+    uint64_t *keys = (uint64_t *)malloc((size_t)n * anchor_occ * sizeof(uint64_t));
+    int32_t *owner = anchor_occ > 1 ? (int32_t *)malloc((size_t)n * anchor_occ * sizeof(int32_t)) : NULL;
     int32_t it;
     for (it = 0; it < n_iter; it++) {
-        pg_anchor_bucket(&enc, it, keys);
         pg_pairlist_t pl;
-        pg_candidate_pairs(keys, n, PG_BUCKET_CAP, &pl);
+        if (anchor_occ == 1) {          /* v1 path, kept bit-for-bit */
+            pg_anchor_bucket(&enc, it, keys);
+            pg_candidate_pairs(keys, n, PG_BUCKET_CAP, &pl);
+        } else {
+            int64_t nk = pg_anchor_keys_multi(&enc, it, anchor_occ, keys, owner);
+            pg_candidate_pairs_owned(keys, owner, nk, PG_BUCKET_CAP, &pl);
+        }
         work.cand += pl.count;
         int64_t merged = 0;
         for (int64_t k = 0; k < pl.count; k++) {
@@ -249,9 +254,10 @@ void sv_s1_cores(const char *const *seqs, const int32_t *lens, int32_t n,
         pg_pairlist_free(&pl);
     }
     free(keys);
+    free(owner);
     sv_uf_labels(&uf, lab_out);
     if (work_out) *work_out = work;
-    if (iters_done_out) *iters_done_out = it; /* == n_iter (the C port has no stall_stop) */
+    if (iters_done_out) *iters_done_out = it; /* == n_iter (there is no early stop) */
 
     sv_uf_free(&uf);
     pg_free_signatures(&sig);
@@ -267,8 +273,8 @@ void sv_split_cores_orphans(const int32_t *lab, int32_t n,
     for (int32_t i = 0; i < n; i++) cnt[lab[i]]++;
 
     /* Collect labels with >1 member, sorted ascending by label value (this
-    ** matches the component order of Python's `sorted(members.items())`,
-    ** since raw union-find labels are already directly sortable integers). */
+    ** gives a fixed component order, since raw union-find labels are
+    ** already directly sortable integers). */
     int32_t *core_labels = (int32_t *)malloc((size_t)n * sizeof(int32_t));
     int32_t ncore = 0;
     for (int32_t l = 0; l < n; l++) if (cnt[l] > 1) core_labels[ncore++] = l;
@@ -401,21 +407,12 @@ static int32_t align_ops(const char *a, int32_t la, const char *b, int32_t lb,
     (void)rev;
     /* Write directly into ops_out in reverse order, then flip it at the end.
     **
-    ** TIE-BREAK PRIORITY ORDER: delete is preferred over diagonal
-    ** (match/replace), which is preferred over insert. This is NOT an
-    ** arbitrary choice -- it was picked empirically to match
-    ** rapidfuzz.distance.Levenshtein.opcodes() (the Python reference) on
-    ** homopolymer-deletion cases (e.g. "XAAAAY"->"XAAAY": rapidfuzz places
-    ** the deletion at the first position of the run, not the
-    ** diagonal-first choice that would shift a different position).
-    ** Verified on D10-length-40 (502 Stage-2 cores): delete-first cuts the
-    ** consensus mismatches against Python from 19->15 out of 502 cores
-    ** (see correctness_c_vs_python.csv and §7 of CONVENTIONS_STARCODEV.md).
-    ** rapidfuzz itself uses a bit-vector algorithm (Myers/Hyyro) that isn't
-    ** documented as a single fixed-priority backtrace DP -- so 100%
-    ** agreement on every ambiguous column isn't achievable this way; the
-    ** remaining 15/502 (~3%) are adjacent multi-edit cases, documented as a
-    ** known limitation rather than a hidden bug. */
+    ** TIE-BREAK PRIORITY ORDER: when several edit paths cost the same,
+    ** delete is preferred over diagonal (match/replace), which is preferred
+    ** over insert. The order is arbitrary but fixed, and it matters: in a
+    ** homopolymer run ("XAAAAY" -> "XAAAY") every position of the run is an
+    ** equally good place for the deletion, and this order always picks the
+    ** first one, so all members of a core vote on the same column. */
     while (i > 0 || j > 0) {
         if (i > 0 && D[DIDX(i, j)] == D[DIDX(i - 1, j)] + 1) {
             ops_out[k].tag = OP_DEL;
@@ -530,7 +527,7 @@ static void consensus_from_anchor(const char *anchor, int32_t la,
     /* Pick the best insertion per position: strict majority (2*c > m); ties
     ** between different texts at the same position are broken canonically
     ** (largest count, then shortest text, then lexicographically smallest)
-    ** -- mirroring the max() over the Python tuple `(c, -len(txt), txt)`. */
+    ** -- i.e. the maximum of the tuple (count, -length, text). */
     int32_t *best_ins_for_pos = (int32_t *)malloc((size_t)(la + 1) * sizeof(int32_t));
     for (int32_t p = 0; p <= la; p++) best_ins_for_pos[p] = -1;
     for (int32_t t = 0; t < n_ins_tab; t++) {
@@ -626,13 +623,14 @@ void sv_s2_result_free(sv_s2_result_t *r) {
 /* ================================================================== STAGE 3
 ** K1 -- combined 64-bit decision key (d << 32) | consensus_idx. `min` over
 ** this key is associative-commutative: reducing it in any order gives the
-** same result (on the GPU: a single atomicMin on an unsigned long long). */
+** same result (on a GPU this is a single atomicMin on an unsigned long long). */
 void sv_s3_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_t norph,
                    const char *const *cons, const int32_t *cons_lens, int32_t ncons,
-                   int32_t tau_abs, int32_t sig_abs, int32_t n_iter,
+                   int32_t tau_abs, int32_t sig_abs, int32_t n_iter, int32_t anchor_occ,
                    int32_t *bd_out, int32_t *bi_out, uint8_t *absorbed_out,
                    sv_work_t *work_out) {
     int32_t ntot = norph + ncons;
+    if (anchor_occ < 1) anchor_occ = 1;
     const char **allseq = (const char **)malloc((size_t)ntot * sizeof(char *));
     int32_t *alllens = (int32_t *)malloc((size_t)ntot * sizeof(int32_t));
     uint8_t *is_cons = (uint8_t *)calloc((size_t)ntot, 1);
@@ -655,12 +653,18 @@ void sv_s3_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_
     sv_work_t work = {0, 0, 0, 0};
     u64set_t seen;
     u64set_init(&seen, 4096);
-    uint64_t *keys = (uint64_t *)malloc((size_t)ntot * sizeof(uint64_t));
+    uint64_t *keys = (uint64_t *)malloc((size_t)ntot * anchor_occ * sizeof(uint64_t));
+    int32_t *owner = anchor_occ > 1 ? (int32_t *)malloc((size_t)ntot * anchor_occ * sizeof(int32_t)) : NULL;
 
     for (int32_t it = 0; it < n_iter; it++) {
-        pg_anchor_bucket(&enc, it, keys);
         pg_pairlist_t pl;
-        pg_candidate_pairs(keys, ntot, PG_BUCKET_CAP, &pl);
+        if (anchor_occ == 1) {
+            pg_anchor_bucket(&enc, it, keys);
+            pg_candidate_pairs(keys, ntot, PG_BUCKET_CAP, &pl);
+        } else {
+            int64_t nk = pg_anchor_keys_multi(&enc, it, anchor_occ, keys, owner);
+            pg_candidate_pairs_owned(keys, owner, nk, PG_BUCKET_CAP, &pl);
+        }
         for (int64_t k = 0; k < pl.count; k++) {
             int64_t x = pl.a[k], y = pl.b[k];
             uint8_t cx = is_cons[x], cy = is_cons[y];
@@ -684,6 +688,7 @@ void sv_s3_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_
         pg_pairlist_free(&pl);
     }
     free(keys);
+    free(owner);
     u64set_free(&seen);
 
     for (int32_t i = 0; i < norph; i++) {

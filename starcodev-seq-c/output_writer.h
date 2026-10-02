@@ -1,9 +1,8 @@
 /*
 ** output_writer.h -- StarcodeV's output writer, format-compatible with
 ** original Starcode (gui11aume/starcode v1.4, -c / connected-components
-** mode) so the Python evaluation harness (`eval_generalisasi.py`,
-** `run_starcode`) can parse this binary's output without touching its
-** parser.
+** mode) so scripts that already parse Starcode's output can read this
+** binary's output unchanged.
 **
 ** Mirrors the role of src/view.c/.h from original Starcode -- see
 ** CONVENTIONS_STARCODEV.md §1 and §5. Four modes, each checked directly
@@ -36,8 +35,7 @@ typedef struct {
     int32_t   n_lines;
 } sv_out_rawinput_t;
 
-/* Distinct reads, sorted lexicographically (matches Python's
-** `sorted(per)` convention), with a list of 1-based raw line ids mapped to
+/* Distinct reads, sorted lexicographically, with a list of 1-based raw line ids mapped to
 ** each distinct read. */
 typedef struct {
     char    **seqs;         /* n, allocated (owned by this struct) */

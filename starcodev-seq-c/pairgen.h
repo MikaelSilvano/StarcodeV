@@ -7,11 +7,10 @@
 ** within radius tau of X?" via a sequential, node-by-node tree walk; this
 ** module answers the same question with deterministic anchor hashing plus
 ** a q-gram signature pre-filter, whose unit of work (hash one string,
-** compare one pair) is independent across strings/pairs -- a direct port
-** target for a GPU kernel (p1_pairgen.cu).
+** compare one pair) is independent across strings/pairs, so it can also be
+** run in parallel.
 **
-** An exact mirror of starcodev.py (encode/signatures/anchor_bucket/
-** candidate_pairs). The restrictions from §4.2 of the StarcodeV design doc
+** Contents: encode, signatures, anchor_bucket, candidate_pairs. The restrictions from §4.2 of the StarcodeV design doc
 ** apply here too: no runtime RNG (the anchor table comes from a fixed LCG
 ** constant, computed once), no floating-point reduction, no dependency on
 ** input order.
@@ -77,11 +76,25 @@ int pg_sig_hamming(const pg_signatures_t *sig, int64_t a, int64_t b);
 ** sentinel. */
 void pg_anchor_bucket(const pg_encoded_t *enc, int32_t it, uint64_t *keys_out);
 
-/* All pairs within a bucket (not just adjacent ones) -- see the calibration
-** note in starcodev.py: 14x more effective per iteration than only
-** considering adjacent pairs after sorting. */
+/* All pairs within a bucket, not just the adjacent ones after sorting: the
+** all-pairs version finds many more true pairs per iteration. */
 void pg_candidate_pairs(const uint64_t *keys, int32_t n, int32_t cap,
                          pg_pairlist_t *out);
+
+/* v2: one key per occurrence of the anchor instead of only the first one.
+** An indel right after the first occurrence changes its key, but a later
+** occurrence past the indel can still match (read 5335 vs its own
+** consensus is exactly this case). keys_out/owner_out need room for
+** n * max_occ entries. Strings without the anchor emit nothing. Returns the
+** number of keys written. With max_occ = 1 the candidate pairs are the
+** same as pg_anchor_bucket + pg_candidate_pairs. */
+int64_t pg_anchor_keys_multi(const pg_encoded_t *enc, int32_t it, int32_t max_occ,
+                             uint64_t *keys_out, int32_t *owner_out);
+
+/* Pairs of different owners that share a key. The same pair can come out
+** more than once (two shared occurrences); callers already de-duplicate. */
+void pg_candidate_pairs_owned(const uint64_t *keys, const int32_t *owner, int64_t count,
+                              int32_t cap, pg_pairlist_t *out);
 
 void pg_pairlist_init(pg_pairlist_t *pl);
 void pg_pairlist_push(pg_pairlist_t *pl, int64_t a, int64_t b);

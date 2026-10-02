@@ -2,10 +2,10 @@
 ** pairgen.c -- see pairgen.h and CONVENTIONS_STARCODEV.md before making
 ** changes here.
 **
-** Every function in this file is an exact mirror of the Python function of
-** the same name (minus the pg_ prefix) in starcodev.py. Any behavioral
-** difference is a bug -- not a "C style" adjustment.
-** correctness_c_vs_python.csv verifies this.
+** This file produces the candidate pairs that replace Starcode's trie search.
+** It must stay deterministic: no RNG, no dependency on input order, and a
+** total order on every sort, so that the same input always gives the same
+** pair list.
 */
 #include "pairgen.h"
 
@@ -27,7 +27,7 @@ void pg_init_anchors(void) {
     uint32_t x = 1;
     int32_t count = 0;
     while (count < nmax) {
-        x = (uint32_t)(1664525u * x + 1013904223u);   /* fixed LCG constant, same as the Python reference */
+        x = (uint32_t)(1664525u * x + 1013904223u);   /* fixed LCG constants (Numerical Recipes), so the anchor order never changes */
         int32_t v = (int32_t)(x % (uint32_t)nmax);
         if (!seen[v]) {
             seen[v] = 1;
@@ -248,6 +248,75 @@ void pg_candidate_pairs(const uint64_t *keys, int32_t n, int32_t cap,
             for (int32_t x = st; x < en; x++)
                 for (int32_t y = x + 1; y < en; y++)
                     pg_pairlist_push(out, ks[x].idx, ks[y].idx);
+        }
+        st = en;
+    }
+    free(ks);
+}
+
+/* ---------------------------------------------------------------- multi-occurrence keys (v2) */
+int64_t pg_anchor_keys_multi(const pg_encoded_t *enc, int32_t it, int32_t max_occ,
+                             uint64_t *keys_out, int32_t *owner_out) {
+    int32_t n = enc->n, maxlen = enc->maxlen, glen = enc->glen;
+    int32_t alen; const int32_t *anchors = pg_anchor_table(&alen);
+    int32_t a = anchors[it % alen];
+    int64_t nk = 0;
+
+    for (int32_t i = 0; i < n; i++) {
+        const int32_t *grow = enc->G + (size_t)i * glen;
+        const uint8_t *row = enc->T + (size_t)i * maxlen;
+        int32_t found = 0;
+        for (int32_t k = 0; k < glen && found < max_occ; k++) {
+            if (grow[k] != a) continue;
+            found++;
+            /* same key as pg_anchor_bucket for this position */
+            int32_t start = k + PG_W_ANCHOR;
+            uint64_t key = 0;
+            for (int j = 0; j < PG_L_HASH; j++) {
+                int32_t p = start + j;
+                int64_t ch;
+                if (p >= enc->L[i]) {
+                    ch = 4;
+                } else {
+                    int32_t idx = p; if (idx < 0) idx = 0; if (idx >= maxlen) idx = maxlen - 1;
+                    ch = (int64_t)row[idx];
+                }
+                key = key * 5u + (uint64_t)ch;
+            }
+            keys_out[nk] = key;
+            owner_out[nk] = i;
+            nk++;
+        }
+    }
+    return nk;
+}
+
+typedef struct { uint64_t key; int32_t owner; } pg_owned_t;
+
+static int pg_owned_cmp(const void *pa, const void *pb) {
+    const pg_owned_t *a = (const pg_owned_t *)pa, *b = (const pg_owned_t *)pb;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return (a->owner > b->owner) - (a->owner < b->owner);   /* full order, so the sort is deterministic */
+}
+
+void pg_candidate_pairs_owned(const uint64_t *keys, const int32_t *owner, int64_t count,
+                              int32_t cap, pg_pairlist_t *out) {
+    pg_pairlist_init(out);
+    if (count <= 0) return;
+    pg_owned_t *ks = (pg_owned_t *)malloc((size_t)count * sizeof(pg_owned_t));
+    for (int64_t i = 0; i < count; i++) { ks[i].key = keys[i]; ks[i].owner = owner[i]; }
+    qsort(ks, (size_t)count, sizeof(pg_owned_t), pg_owned_cmp);
+
+    int64_t st = 0;
+    while (st < count) {
+        int64_t en = st + 1;
+        while (en < count && ks[en].key == ks[st].key) en++;
+        int64_t m = en - st;
+        if (m >= 2 && m <= cap) {
+            for (int64_t x = st; x < en; x++)
+                for (int64_t y = x + 1; y < en; y++)
+                    if (ks[x].owner != ks[y].owner)
+                        pg_pairlist_push(out, ks[x].owner, ks[y].owner);
         }
         st = en;
     }

@@ -1,26 +1,25 @@
-# Sequential C Port Conventions: StarcodeV follows the `gui11aume/starcode` structure
+# Sequential C Conventions: StarcodeV follows the `gui11aume/starcode` structure
 
-This document maps the sequential C port of the Python reference
-(`starcodev.py` + `autocal.py`, already validated across 11 synthetic
-regimes in `CORRECTNESS_REPORT_GENERALIZATION.md`) onto the file layout
-and code style of the original **gui11aume/starcode v1.4** repo
+This document maps the sequential C implementation of StarcodeV onto the
+file layout and code style of the original **gui11aume/starcode v1.4** repo
 (`src/main-starcode.c`, `starcode.c/h`, `trie.c/h`, `view.c/h`). The goal:
 anyone already familiar with the original repo should be able to find the
-equivalent piece in this port right away, and anywhere this port has
+equivalent piece in StarcodeV right away, and anywhere this implementation has
 **no** direct equivalent, that's called out explicitly instead of left as
 a gap the reader has to guess at.
 
 ## 1. File correspondence table
 
-| Original file (`gui11aume/starcode`) | This port's file | Why |
+| Original file (`gui11aume/starcode`) | StarcodeV file | Why |
 |---|---|---|
 | `src/main-starcode.c` | `main-starcodev.c` | CLI driver: `getopt_long` with a `long_options[]` table, the `USAGE` string, `say_usage()`/`say_version()`, `SIGSEGV_handler()` — the pattern is kept identical. New options (`--tau-core`, `--tau-abs`, `--tau-cons`, `--auto-tau`) are added without changing the meaning of the legacy options that still apply (`-i -o -t -d -c -q -v -h`). |
 | `src/starcode.h` | `starcodev.h` | Public declarations for stages 1-4, union-find, `canonical_partition`, and the constants (`TAU_CORE`, `TAU_ABS`, `TAU_CONS`, etc.) — the equivalent of `starcode.h` declaring `int starcode(...)` and `output_t`/`cluster_t`. |
 | `src/starcode.c` | `starcodev.c` | Core logic: `s1_cores`, `s2_consensus`, `s3_absorb`, `s4_merge_cons`, `assemble`. The equivalent of `starcode.c`, which orchestrates the trie + clustering calls. |
 | `src/trie.c` + `src/trie.h` | **`pairgen.c` + `pairgen.h`** (NOT "trie.c/h") | See §2 — this is a design replacement, not a rename. |
-| `src/view.c` + `src/view.h` | `output_writer.c` + `output_writer.h` | Output writer: default mode, `--print-clusters`, `--seq-id`, `--tidy`. The line format is kept identical to original Starcode so it's directly compatible with the Python evaluation harness (`eval_generalisasi.py`, `compare.py`) without touching the parser on the Python side. |
+| `src/view.c` + `src/view.h` | `output_writer.c` + `output_writer.h` | Output writer: default mode, `--print-clusters`, `--seq-id`, `--tidy`. The line format is kept identical to original Starcode, so any script that already parses Starcode's output can read StarcodeV's output unchanged. |
 | *(not present in the original repo)* | `autocal.c` + `autocal.h` | A new module: separability-gap detection and `auto_tau()`. Nothing like it exists in Starcode v1.4, because Starcode doesn't do automatic threshold calibration (τ is either given by the user or comes from a different heuristic via `-d auto`). |
-| `Makefile` | `Makefile` | A `make seq` target (plain gcc, no CUDA) added alongside this project's existing `make gpu`/`make shim` targets from the CUDA port. |
+| *(not present in the original repo)* | `exactcons.c` + `exactcons.h` | Added in v2. Exact work on the consensus set: bit-parallel edit distance, the exact distance histogram, S4 without the candidate filter, the S3 nearest-consensus check and the optional S1 audit. See CHANGES_v2.md. |
+| `Makefile` | `Makefile` | A `make seq` target: plain gcc, no CUDA. |
 
 ## 2. Why `trie.c/h` was replaced rather than ported
 
@@ -41,8 +40,8 @@ bucket get grouped together, and **every pair within a bucket** becomes
 a candidate, further filtered by q-gram signature Hamming distance
 before exact Levenshtein verification. The unit of work here — "hash one
 read at one iteration", "compare one candidate pair" — is independent
-across reads/pairs, which is exactly what makes it a direct port target
-for a GPU kernel (`p1_pairgen.cu` in this project's CUDA implementation).
+across reads/pairs, which also means the work can be spread over
+many threads.
 
 Since there's no 1:1 data-structure correspondence (tree vs. hash table),
 this file was given the new name **`pairgen.c/h`** (pair generator)
@@ -53,9 +52,9 @@ final verification is still exact edit distance (Levenshtein with
 `score_cutoff`), same as original Starcode — precision is guaranteed by
 construction; only recall (whether every true edge gets found) is
 probabilistic, and that's measured via the iteration sweep
-(`N_ITER_S1`, etc. — see the calibration comments in `starcodev.py`).
+(`N_ITER_S1`, etc. — see VALIDATION_v2.md and the `S1 audit` option).
 
-## 3. §4.2 restrictions binding on the C port (identical to the Python version)
+## 3. §4.2 restrictions binding on this implementation
 
 1. **NO RNG** — the anchor-position schedule comes from a constant
    table (`pg_init_anchors()`, a fixed-constant LCG from Numerical
@@ -64,7 +63,7 @@ probabilistic, and that's measured via the iteration sweep
    path.
 2. **NO floating-point reduction** — every decision quantity (edit
    distance, Hamming signature, consensus vote count) is `int`/`int64_t`.
-   The only `double` anywhere in this port is `CAL_MARGIN = 0.25` in
+   The only `double` anywhere in this code is `CAL_MARGIN = 0.25` (default of `--margin`, fixed in v1.1; see AUTOTAU_REVISION.md) in
    `cal_auto_tau()`, used purely as a one-shot multiplier right before
    it's rounded down to an `int` — never as an accumulator.
 3. **NO order-dependent accumulator that affects a decision** — every
@@ -74,9 +73,9 @@ probabilistic, and that's measured via the iteration sweep
 4. **NO dependency on input order** — the K5 union-find rule always
    picks the smallest-indexed root; the K5 canonical relabeling sorts
    clusters by their lexicographically-smallest member. This is tested
-   directly in §7 (the C determinism test under input permutation).
+   directly in §7 (determinism under input permutation).
 
-## 4. Canonical tie-breakers K1-K5 (kept exactly as in the Python reference)
+## 4. Canonical tie-breakers K1-K5
 
 | Code | Context | Rule |
 |---|---|---|
@@ -86,11 +85,11 @@ probabilistic, and that's measured via the iteration sweep
 | K4 | Medoid subsampling for large cores (S2) | Take the `M_MAX=64` lexicographically-smallest members, not the first `M_MAX` in input order. |
 | K5 | Union-find & canonical partition | Union-find root = smallest index; final cluster id = lexicographic rank of the cluster's smallest member. |
 
-## 5. Output format — harness compatibility
+## 5. Output format
 
 `output_writer.c` reproduces original Starcode's `view.c` in exactly the
-same four modes, because `eval_generalisasi.py`/`compare.py` parse the
-output lines against this format:
+same four modes, so the output lines follow the format Starcode users
+already know:
 
 - **default**: one line per cluster, `centroid<TAB>size` (in ascending
   canonical label order).
@@ -100,68 +99,53 @@ output lines against this format:
 - **`--tidy`**: one line per **input** read (not per cluster):
   `read<TAB>centroid`.
 
-## 6. Validation status
+## 6. Validation status: StarcodeV against Starcode
 
-This port was checked for **correctness** (the C canonical partition
-compared as a set of groups against the Python canonical partition) on
-regimes D1-baseline, D7-depth-3, D9-length-150, D10-length-40 — chosen
-to cover the baseline case, low copy depth, a core-coverage failure case
-(D9), and a fixed-τ failure case that `cal_auto_tau()` resolves (D10).
-Full results in `correctness_c_vs_python.csv`:
+The check that matters is whether StarcodeV keeps everything Starcode got
+right and only adds to it. Two partitions are compared with an overlap graph
+(one node per cluster of each partition, an edge when two clusters share a
+read). Every connected component is *identical*, a *merge* (several Starcode
+clusters inside one StarcodeV cluster), a *split* (one Starcode cluster divided
+among several StarcodeV clusters) or *crossing* (reads moved between groups).
+Merge and identical are the intended outcomes; a split or a crossing would mean
+StarcodeV broke something Starcode had kept together.
 
-| Regime | Reads | Py clusters | C clusters | Identical groups | Reads affected | % different |
+Microsoft clustered-nanopore data (269,709 reads, 9,984 oligos), Starcode v1.4
+at -d 8 against StarcodeV v2 default:
+
+| | Clusters | Purity | Whole oligos | ARI | Recovery γ = 0.5 | Strict γ = 0.9 |
 |---|---|---|---|---|---|---|
-| D1-baseline | 3274 | 500 | 500 | 500/500 | 0 | 0.000% |
-| D7-depth-3 | 1500 | 579 | 579 | 579/579 | 0 | 0.000% |
-| D9-length-150 | 4000 | 3540 | 3540 | 3540/3540 | 0 | 0.000% |
-| D10-length-40 | 3910 | 470 | 471 | 469/470 | 32 | 0.818% |
+| Starcode -c | 74,435 | 100% | 129 | 0.769 | 89.73% | 5.93% |
+| StarcodeV v2 | 11,163 | 100% | 9,491 | 0.999 | 98.08% | 97.63% |
 
-D1, D7, D9: the C canonical partition is **bit-for-bit identical** to
-Python (0 differing groups). D10 has **1 differing group out of
-470/471** (32 of 3910 reads, 0.818%), traced to one residual alignment
-tie-break — see §6.1.
+Overlap graph, Starcode -c against StarcodeV: 1,503 identical, 9,660 merge,
+0 split, 0 crossing. The same holds for Starcode -s and message passing. No
+Starcode cluster is divided and no read crosses into another group, so every
+oligo Starcode recovers is recovered by StarcodeV too.
 
-### 6.1 Where the residual D10 difference comes from, and why it isn't a logic bug
+On the synthetic sets (seed 7 and seed 2026, 15 data sets in all) StarcodeV v2
+shows 0 mixed clusters and 0 crossing components against Starcode -c. It does
+leave 9 split components, all in two regimes with very shallow or very noisy
+reads (D3 and D7), where the S1 filters miss some true d <= 8 edges; the split
+direction is the intended failure mode. VALIDATION_v2.md has the full tables.
 
-`align_ops()` (the Needleman-Wunsch backtrace inside
-`consensus_from_anchor`, S2) hits path ambiguity whenever several edit
-paths tie on distance (e.g. a homopolymer deletion `XAAAAY`→`XAAY` can
-be explained by two different deletion positions at the same distance).
-The Python reference calls
-`rapidfuzz.distance.Levenshtein.opcodes()`, computed via a bit-parallel
-algorithm (Myers/Hyyrö) — **not** a fixed-priority DP-table backtrace.
-Empirical investigation (see the session history) found that a
-backtrace priority order of **delete before diagonal (match/replace)
-before insert** in `align_ops()`'s backward pass matches `rapidfuzz` on
-most of the ambiguous cases, and brought the number of Stage-2 cores
-whose consensus differs from Python on D10 down from 19/502 to 15/502
-(≈3%) — that fix is applied directly in `align_ops()` (see the comment
-in the function body). Since `rapidfuzz` doesn't guarantee that any
-single fixed-priority DP backtrace can reproduce its tie-break in EVERY
-ambiguous column, the remaining ~3% of cores with a one-base-different
-consensus is a **documented limitation**, not a hidden bug.
+### 6.1 Tie-breaks in the consensus alignment
 
-On D10, one consensus-base difference (core anchor
-`CGGTCTCGCACATTAACTCACGTCTACACTCGAAAATTG` vs the C version's
-`CGGTCTCGCACATTAACTTCACGTCTACACTCGAAAATTG`, position 16) shifts the
-inter-consensus Levenshtein distance right around the Stage 4
-`tau_cons=20` threshold, breaking a union-find chain differently from
-Python for 5 cores that should merge into 1 component (Python) but
-split into 2 components (C). The impact is fully contained to 32 reads
-(0.818% of D10), doesn't spread to the other regimes (D1/D7/D9: 0
-differences), and doesn't change this report's generalization
-conclusions.
+`align_ops()` (the backtrace inside `consensus_from_anchor`, S2) has to choose
+between edit paths of equal cost, for example a homopolymer deletion
+`XAAAAY` -> `XAAY`, where the deletion can sit at any position of the run. The
+rule is fixed: delete before diagonal (match/replace) before insert, so the
+deletion is always placed at the first position of the run and all members of
+a core vote on the same column. The choice is arbitrary, but because it is
+fixed the consensus does not depend on anything but the reads themselves.
 
 ## 7. Input-permutation determinism test
 
-Every regime (D1, D7, D9, D10) was tested with **3 random permutations**
-of the input lines (`random.shuffle`, seeds 1/2/3) run through the same
-C binary. The cluster partition was compared as a set of **read-string**
-groups (not line indices, since those shift under permutation) against
-the partition on the original ordering. Results
-(`determinism_c_permutation.csv`): **all 12 combinations (4 regimes × 3
-seeds) match 100%** — 0 differing groups in every comparison. This
-confirms restriction §3.4: the smallest-rooted K5 union-find and the
-lexicographic canonical relabeling make the final result independent of
-input order, regardless of the anchor-hash processing order in Stage
-1/3/4.
+Each data set in `validation/determinism.csv` (L40_p05, L60_p10, D3, D10, D11)
+was run again on the original input and on 3 shuffled copies of the input
+lines. The re-run is byte-identical and the partition of the shuffled inputs
+is identical, as a set of read-string groups (line indices shift under
+permutation, so they are not compared): 15 of 15 combinations match. This
+confirms restriction §3.4: the smallest-rooted union-find and the
+lexicographic canonical relabelling make the final result independent of input
+order, whatever the order in which anchor buckets are processed in S1 and S3.
