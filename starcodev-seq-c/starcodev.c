@@ -1,10 +1,11 @@
 /*
 ** starcodev.c -- see starcodev.h and CONVENTIONS_STARCODEV.md.
 **
-** S1 to S4, union-find and the canonical partition. Wherever two choices
-** tie (medoid, vote, absorption target) the rule is fixed and documented
-** next to the code (K1-K5 in CONVENTIONS_STARCODEV.md), so the result does
-** not depend on input order or on the order in which pairs are visited.
+** Union-find, canonical partition, S1, S2 and the filtered searches of S3
+** and S4. Wherever two choices tie (medoid, vote, absorption target) the
+** rule is fixed and documented next to the code (K1-K5 in
+** CONVENTIONS_STARCODEV.md), so the result does not depend on input order
+** or on the order in which pairs are visited.
 */
 #include "starcodev.h"
 #include "pairgen.h"
@@ -24,7 +25,7 @@ static inline int base_idx(char c) {
 
 /* ================================================================== u64set
 ** A small open-addressing hash set for deduplicating pairs (i<<32)|j,
-** reused by S1/S3/S4 to skip pairs that were already checked. Deterministic:
+** used by S1, S3 and S4 to skip pairs that were already checked. Deterministic:
 ** it's only ever used to SKIP redundant work, never to influence the
 ** actual decision order (unions/absorptions still go through the combined
 ** K1/K5 keys). */
@@ -228,7 +229,7 @@ void sv_s1_cores(const char *const *seqs, const int32_t *lens, int32_t n,
     int32_t it;
     for (it = 0; it < n_iter; it++) {
         pg_pairlist_t pl;
-        if (anchor_occ == 1) {          /* v1 path, kept bit-for-bit */
+        if (anchor_occ == 1) {          /* one key per read: plain bucket sort is enough */
             pg_anchor_bucket(&enc, it, keys);
             pg_candidate_pairs(keys, n, PG_BUCKET_CAP, &pl);
         } else {
@@ -378,11 +379,9 @@ static int32_t medoid_pick(const int32_t *members, int32_t nmem,
 }
 
 /* Full Levenshtein backtrace (Wagner-Fischer, O(la*lb) memory) producing a
-** position-annotated edit script, used for the column consensus. Tie
-** priority when several paths cost the same: diagonal (match/substitute)
-** > delete > insert -- a deterministic convention chosen for consistency
-** (not RNG, not dependent on input order), documented in
-** CONVENTIONS_STARCODEV.md. */
+** position-annotated edit script, used for the column consensus. When
+** several paths cost the same, the backtrace prefers delete, then diagonal
+** (match/substitute), then insert; see the note inside the function. */
 typedef enum { OP_EQ, OP_SUB, OP_DEL, OP_INS } op_tag_t;
 typedef struct { op_tag_t tag; int32_t pos; char ch; } elem_op_t;
 
@@ -620,11 +619,11 @@ void sv_s2_result_free(sv_s2_result_t *r) {
     r->cons = NULL; r->sizes = NULL; r->anchors = NULL; r->count = 0;
 }
 
-/* ================================================================== STAGE 3
+/* ================================================================== STAGE 4: candidate search
 ** K1 -- combined 64-bit decision key (d << 32) | consensus_idx. `min` over
 ** this key is associative-commutative: reducing it in any order gives the
 ** same result (on a GPU this is a single atomicMin on an unsigned long long). */
-void sv_s3_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_t norph,
+void sv_s4_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_t norph,
                    const char *const *cons, const int32_t *cons_lens, int32_t ncons,
                    int32_t tau_abs, int32_t sig_abs, int32_t n_iter, int32_t anchor_occ,
                    int32_t *bd_out, int32_t *bi_out, uint8_t *absorbed_out,
@@ -707,8 +706,8 @@ void sv_s3_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_
     free(allseq); free(alllens); free(is_cons);
 }
 
-/* ================================================================== STAGE 4 */
-void sv_s4_merge_cons(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
+/* ================================================================== STAGE 3: filtered merge (--approx) */
+void sv_s3_merge_cons(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
                        int32_t tau_cons, int32_t sig_abs, int32_t n_iter,
                        int32_t *lab_out, sv_work_t *work_out) {
     pg_encoded_t enc;
@@ -756,14 +755,14 @@ void sv_s4_merge_cons(const char *const *cons, const int32_t *cons_lens, int32_t
 /* ================================================================== final assembly */
 void sv_assemble(const sv_core_list_t *cores,
                   const int32_t *orph_idx, int32_t norph,
-                  const int32_t *bi3, const uint8_t *absorbed,
-                  const int32_t *lab_s4, int32_t n_reads,
+                  const int32_t *bi4, const uint8_t *absorbed,
+                  const int32_t *lab_s3, int32_t n_reads,
                   int32_t *out) {
     for (int32_t i = 0; i < n_reads; i++) out[i] = -1;
     int32_t nc = cores->count;
     int32_t maxlab = -1;
     for (int32_t c = 0; c < nc; c++) {
-        int32_t lab = lab_s4[c];
+        int32_t lab = lab_s3[c];
         if (lab > maxlab) maxlab = lab;
         const int32_t *mem = cores->members[c];
         for (int32_t k = 0; k < cores->sizes[c]; k++) out[mem[k]] = lab;
@@ -772,7 +771,7 @@ void sv_assemble(const sv_core_list_t *cores,
     for (int32_t k = 0; k < norph; k++) {
         int32_t g = orph_idx[k];
         if (absorbed[k]) {
-            out[g] = lab_s4[bi3[k]];
+            out[g] = lab_s3[bi4[k]];
         } else {
             out[g] = nxt++;
         }

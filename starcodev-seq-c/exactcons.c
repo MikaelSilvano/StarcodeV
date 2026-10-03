@@ -132,9 +132,9 @@ void ec_all_pairs(const ec_peq_t *peq, const char *const *cons, const int32_t *l
     }
 }
 
-/* ================================================================ S4 */
+/* ================================================================ S3 */
 
-int64_t ec_merge(const ec_edges_t *e, int32_t k, int32_t tau, int32_t keep,
+int64_t ec_s3_merge(const ec_edges_t *e, int32_t k, int32_t tau, int32_t keep,
                  int32_t *lab_out, int32_t *c_post_out) {
     sv_uf_t uf;
     sv_uf_init(&uf, k);
@@ -153,7 +153,7 @@ int64_t ec_merge(const ec_edges_t *e, int32_t k, int32_t tau, int32_t keep,
     return unions;
 }
 
-/* ================================================================ S3 */
+/* ================================================================ S4 */
 
 /* neighbour lists in CSR form, built from the undirected edge list */
 typedef struct { int64_t *start; int32_t *nb; int32_t *d; } csr_t;
@@ -177,12 +177,12 @@ static void csr_build(const ec_edges_t *e, int32_t k, csr_t *g) {
 
 static void csr_free(csr_t *g) { free(g->start); free(g->nb); free(g->d); }
 
-void ec_s3_resolve(const char *const *orph, const int32_t *orph_lens, int32_t norph,
+void ec_s4_resolve(const char *const *orph, const int32_t *orph_lens, int32_t norph,
                    const ec_peq_t *peq, const char *const *cons, const int32_t *cons_lens, int32_t k,
-                   const int32_t *lab4, const ec_edges_t *edges, int32_t keep,
+                   const int32_t *lab3, const ec_edges_t *edges, int32_t keep,
                    int32_t c_post, int32_t tau_abs,
                    const int32_t *bd_in, const int32_t *bi_in,
-                   int32_t *bi_out, uint8_t *absorbed_out, ec_s3_stats_t *st) {
+                   int32_t *bi_out, uint8_t *absorbed_out, ec_s4_stats_t *st) {
     (void)cons;
     memset(st, 0, sizeof(*st));
     csr_t g;
@@ -235,13 +235,13 @@ void ec_s3_resolve(const char *const *orph, const int32_t *orph_lens, int32_t no
         /* someone from another component just as close: don't pick a side */
         int tie = 0;
         for (int32_t x = 0; x < nc; x++)
-            if (cd[x] == best_d && lab4[cand[x]] != lab4[best]) { tie = 1; break; }
+            if (cd[x] == best_d && lab3[cand[x]] != lab3[best]) { tie = 1; break; }
         if (tie) { st->tie_rejected++; continue; }
 
         bi_out[o] = best;
         absorbed_out[o] = 1;
         if (bi < 0) st->added++;
-        else if (lab4[bi] != lab4[best]) st->moved++;
+        else if (lab3[bi] != lab3[best]) st->moved++;
     }
     free(cand); free(cd);
     csr_free(&g);

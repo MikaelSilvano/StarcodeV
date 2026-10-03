@@ -1,24 +1,24 @@
 /*
-** exactcons.h -- exact work on the consensus set (v2).
+** exactcons.h -- exact work on the consensus set.
 **
 ** S1 has to use a filtered candidate search because the read set is large.
 ** Everything after S2 works on one consensus per core, and the number of
 ** cores is close to the number of oligos (10,066 on the Microsoft data,
 ** against 267,558 distinct reads). That set is small enough to handle
-** exactly, so v2 moves every merge decision that could join two oligos
-** onto exact distances:
+** exactly, so every decision that could join two oligos uses exact
+** distances:
 **
 **   H   all consensus pairs -> exact distance histogram -> gap -> ceiling C
-**   S4  union-find over every pair with d <= tau_cons (no filter, no misses)
-**   S3  an orphan joins a component only if that component holds its
+**   S3  union-find over every pair with d <= tau_cons (no filter, no misses)
+**   S4  an orphan joins a component only if that component holds its
 **       nearest consensus, checked exactly when it can't be proven cheaply
 **
 ** When something can't be settled, the read stays on its own. A split costs
 ** one extra cluster; a wrong merge corrupts a cluster.
 **
-** All decisions are integer min/sum reductions, so the order in which
-** pairs are visited never changes the result (this matters for the GPU
-** port, where it won't be fixed).
+** All decisions are integer min/sum reductions, so the order in which pairs
+** are visited never changes the result, which also holds for a parallel
+** implementation where that order is not fixed.
 */
 #ifndef _EXACTCONS_HEADER
 #define _EXACTCONS_HEADER
@@ -54,16 +54,16 @@ void ec_all_pairs(const ec_peq_t *peq, const char *const *cons, const int32_t *l
                   int32_t k, int32_t dmax, int32_t keep,
                   int64_t *hist /* dmax+1 */, ec_edges_t *edges /* may be NULL */);
 
-/* ---------------------------------------------------------------- S4
+/* ---------------------------------------------------------------- S3
 ** Union-find over the stored edges with d <= tau. lab_out: size k.
 ** Returns the number of successful unions. c_post_out gets the smallest
 ** distance between two consensus left in different components, or keep+1
-** when no such pair was stored (a lower bound, which is all S3 needs). */
-int64_t ec_merge(const ec_edges_t *e, int32_t k, int32_t tau, int32_t keep,
+** when no such pair was stored (a lower bound, which is all S4 needs). */
+int64_t ec_s3_merge(const ec_edges_t *e, int32_t k, int32_t tau, int32_t keep,
                  int32_t *lab_out, int32_t *c_post_out);
 
-/* ---------------------------------------------------------------- S3
-** Input: the filtered S3 result (bd/bi per orphan, bi = -1 when nothing
+/* ---------------------------------------------------------------- S4
+** Input: the filtered S4 result (bd/bi per orphan, bi = -1 when nothing
 ** was found within tau_abs). Output: final consensus index per orphan, or
 ** -1 when it stays a singleton.
 **
@@ -86,14 +86,14 @@ typedef struct {
     int64_t added;         /* absorbed now, filter had found nothing */
     int64_t tie_rejected;  /* left alone because two components were equally close */
     int64_t dist_calls;
-} ec_s3_stats_t;
+} ec_s4_stats_t;
 
-void ec_s3_resolve(const char *const *orph, const int32_t *orph_lens, int32_t norph,
+void ec_s4_resolve(const char *const *orph, const int32_t *orph_lens, int32_t norph,
                    const ec_peq_t *peq, const char *const *cons, const int32_t *cons_lens, int32_t k,
-                   const int32_t *lab4, const ec_edges_t *edges, int32_t keep,
+                   const int32_t *lab3, const ec_edges_t *edges, int32_t keep,
                    int32_t c_post, int32_t tau_abs,
                    const int32_t *bd_in, const int32_t *bi_in,
-                   int32_t *bi_out, uint8_t *absorbed_out, ec_s3_stats_t *st);
+                   int32_t *bi_out, uint8_t *absorbed_out, ec_s4_stats_t *st);
 
 /* ---------------------------------------------------------------- S1 audit
 ** Exact check of S1 on a deterministic sample of reads (every n/sample-th

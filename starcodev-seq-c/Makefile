@@ -6,7 +6,6 @@
 #   make test       build, then run the built-in smoke test (5 lines)
 #   make clean      remove object files and the binary
 #
-# This Makefile builds the sequential program only (no CUDA).
 
 CC       ?= gcc
 CFLAGS   ?= -O2 -std=gnu99 -Wall -Wextra

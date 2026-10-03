@@ -1,22 +1,22 @@
 /*
-** main-starcodev.c -- StarcodeV's CLI driver, using the same getopt_long
-** style as src/main-starcode.c from original Starcode (gui11aume/starcode
-** v1.4). See CONVENTIONS_STARCODEV.md §1: the legacy options (-i -o -t -d
-** -c -q -v -h, --print-clusters, --seq-id, --tidy) keep their original
-** meaning and names; the new options (--tau-core, --tau-abs, --tau-cons,
-** --auto-tau, --sig-abs, --margin, and in v2 --anchor-occ, --exact-max,
-** --audit-sample, --legacy) are added on top without clobbering them.
+** main-starcodev.c -- StarcodeV's command-line driver, in the getopt_long
+** style of src/main-starcode.c from Starcode (gui11aume/starcode v1.4).
+** The Starcode options (-i -o -t -d -c -q -v -h, --print-clusters,
+** --seq-id, --tidy) keep their meaning and names; StarcodeV's own options
+** (--tau-core, --tau-abs, --tau-cons, --auto-tau, --sig-abs, --margin,
+** --anchor-occ, --exact-max, --audit-sample, --approx) are added on top.
 **
-** v2 pipeline order: S1 -> S2 -> H (exact histogram) -> S4 -> S3. S4 used to
-** run last; it doesn't read the orphans, so moving it up changes nothing by
-** itself, but it lets S3 check its picks against the S4 components.
+** Pipeline: S1 cores -> S2 consensus -> H exact distance histogram ->
+** S3 consensus merge -> S4 orphan absorption. S3 runs before S4 because S4
+** checks its picks against the S3 components and the gap between them.
+** With --approx, or with more cores than --exact-max, S3 and S4 use the
+** filtered searches only and S4 runs first; the two stages read nothing
+** from each other in that mode, so their order does not matter there.
 **
-** StarcodeV does not implement original Starcode's message-passing (-r)
-** or sphere (-s) clustering -- its only underlying algorithm is
-** connected-components via union-find (S1+S4), so -c/--connected-comp is
-** accepted for argument compatibility but doesn't change behavior (it's
-** always connected-components). -s/--sphere and -r/--cluster-ratio are
-** rejected with an explicit error message rather than silently ignored.
+** StarcodeV clusters by connected components only (union-find in S1 and
+** S3), so -c/--connected-comp is accepted for compatibility and changes
+** nothing. Starcode's message passing (-r) and sphere mode (-s) are rejected
+** with an explicit error instead of being silently ignored.
 */
 #include <getopt.h>
 #include <signal.h>
@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "starcodev.h"
 #include "pairgen.h"
@@ -47,18 +48,18 @@ char *USAGE =
 "  cluster options: (algorithm: StarcodeV's 4-stage connected components)\n"
 "    -c --connected-comp: accepted for compatibility (always on)\n"
 "       --tau-core: Levenshtein threshold for Stage 1 core formation (default 8)\n"
-"       --tau-abs: Stage 3 orphan-absorption threshold (default 16, or automatic with --auto-tau)\n"
-"       --tau-cons: Stage 4 consensus-merge threshold (default 20, or automatic with --auto-tau)\n"
+"       --tau-abs: Stage 4 orphan-absorption threshold (default 16, or automatic with --auto-tau)\n"
+"       --tau-cons: Stage 3 consensus-merge threshold (default 20, or automatic with --auto-tau)\n"
 "       --auto-tau: pick tau-abs & tau-cons automatically from the separability gap (see autocal.h)\n"
-"       --sig-abs: Hamming signature pre-filter threshold for Stage 3/4 (default 96)\n"
+"       --sig-abs: Hamming signature pre-filter threshold for the Stage 3/4 candidate searches (default 96)\n"
 "       --margin: safety margin for --auto-tau, tau = floor((ceiling-1)*(1-margin)) (default 0.25)\n"
 "       --auto-tau-hist: file to write the consensus distance histogram to (TSV: d, pairs)\n"
 "\n"
-"  v2 options\n"
-"       --anchor-occ: anchor occurrences used per read in S1/S3 candidate search (default 4, 1 = v1)\n"
+"  candidate search and checks\n"
+"       --anchor-occ: anchor occurrences used per read in the S1/S4 candidate search (default 4)\n"
 "       --exact-max: largest number of cores handled with exact S3/S4 (default 50000)\n"
 "       --audit-sample: reads checked exactly against S1 (default 0 = off)\n"
-"       --legacy: run the v1.1 pipeline unchanged (filtered S3/S4, single anchor occurrence)\n"
+"       --approx: filtered S3/S4 only, one anchor occurrence per read (faster, no exact checks)\n"
 "\n"
 "  input/output options (single file, default)\n"
 "    -i --input: input file (default stdin)\n"
@@ -96,7 +97,7 @@ int main(int argc, char **argv) {
     int sig_abs = SV_SIG_ABS;
     double margin = CAL_MARGIN;
     char *hist_path = NULL;
-    static int legacy_flag = 0;  /* --legacy */
+    static int approx_flag = 0;  /* --approx */
     int anchor_occ = 4;
     int exact_max = 50000;
     int audit_sample = 0;
@@ -133,7 +134,7 @@ int main(int argc, char **argv) {
             {"sig-abs",        required_argument,       0, 1004},
             {"margin",         required_argument,       0, 1005},
             {"auto-tau-hist",  required_argument,       0, 1006},
-            {"legacy",         no_argument,       &legacy_flag, 1},
+            {"approx",         no_argument,       &approx_flag, 1},
             {"anchor-occ",     required_argument,       0, 1007},
             {"exact-max",      required_argument,       0, 1008},
             {"audit-sample",   required_argument,       0, 1009},
@@ -255,7 +256,7 @@ int main(int argc, char **argv) {
         if (!fout) { fprintf(stderr, "%s cannot open output file %s\n", ERRM, output); return EXIT_FAILURE; }
     }
 
-    if (vb_flag) fprintf(stderr, "running %s (sequential)\n", VERSION);
+    if (vb_flag) fprintf(stderr, "running %s\n", VERSION);
 
     /* ---------------------------------------------------------- read input */
     sv_out_rawinput_t raw;
@@ -275,7 +276,7 @@ int main(int argc, char **argv) {
     for (int32_t i = 0; i < n; i++) seqs_c[i] = uniq.seqs[i];
 
     /* ---------------------------------------------------------- pipeline */
-    if (legacy_flag) anchor_occ = 1;
+    if (approx_flag) anchor_occ = 1;
     int32_t *lab1 = (int32_t *)malloc((size_t)n * sizeof(int32_t));
     sv_work_t w1; int32_t iters1;
     sv_s1_cores((const char *const *)seqs_c, uniq.lens, n, tau_core,
@@ -312,15 +313,15 @@ int main(int argc, char **argv) {
     int32_t *cons_lens = (int32_t *)malloc((size_t)(K > 0 ? K : 1) * sizeof(int32_t));
     for (int32_t k = 0; k < K; k++) cons_lens[k] = (int32_t)strlen(s2.cons[k]);
 
-    int exact = !legacy_flag && K >= 2 && K <= exact_max;
-    if (!legacy_flag && K > exact_max && vb_flag)
-        fprintf(stderr, "warning: %d cores > --exact-max %d, falling back to filtered S3/S4 "
+    int exact = !approx_flag && K >= 2 && K <= exact_max;
+    if (!approx_flag && K > exact_max && vb_flag)
+        fprintf(stderr, "warning: %d cores > --exact-max %d, using the filtered S3/S4 "
                 "(mode=approx, no purity guarantee)\n", K, exact_max);
 
     int32_t *bd = (int32_t *)malloc((size_t)(norph > 0 ? norph : 1) * sizeof(int32_t));
     int32_t *bi = (int32_t *)malloc((size_t)(norph > 0 ? norph : 1) * sizeof(int32_t));
     uint8_t *absorbed = (uint8_t *)calloc((size_t)(norph > 0 ? norph : 1), 1);
-    int32_t *lab4 = (int32_t *)malloc((size_t)(K > 0 ? K : 1) * sizeof(int32_t));
+    int32_t *lab3 = (int32_t *)malloc((size_t)(K > 0 ? K : 1) * sizeof(int32_t));
     for (int32_t k = 0; k < norph; k++) bi[k] = -1;
 
     if (exact) {
@@ -331,10 +332,10 @@ int main(int argc, char **argv) {
         int64_t *hist = (int64_t *)calloc((size_t)dmax + 2, sizeof(int64_t));
         ec_edges_t edges = {0};
 
-        /* Edges are only needed up to 2*tau (S3 neighbour search) -- storing
+        /* Edges are only needed up to 2*tau (S4 neighbour search) -- storing
         ** everything up to dmax can run into millions of pairs on long reads.
         ** With --auto-tau tau isn't known yet, so that case takes two passes. */
-        int32_t keep;
+        int32_t keep = 0;   /* set below in both branches */
         if (auto_flag) {
             ec_all_pairs(peq, (const char *const *)s2.cons, cons_lens, K, dmax, -1, hist, NULL);
         } else {
@@ -382,28 +383,28 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ---- S4 before S3: S3 needs the components and the gap between them */
+        /* ---- S3: exact merge; S4 needs its components and the gap between them */
         int32_t c_post;
-        int64_t unions = ec_merge(&edges, K, tau_cons, keep, lab4, &c_post);
+        int64_t unions = ec_s3_merge(&edges, K, tau_cons, keep, lab3, &c_post);
         if (vb_flag)
-            fprintf(stderr, "S4: %d consensus -> %lld components at tau_cons=%d, closest pair across components d%s%d\n",
+            fprintf(stderr, "S3: %d consensus -> %lld components at tau_cons=%d, closest pair across components d%s%d\n",
                     K, (long long)(K - unions), tau_cons, c_post > keep ? ">=" : "=", c_post);
 
-        /* ---- S3: filtered candidates first, then the exact check */
+        /* ---- S4: filtered candidates first, then the exact check */
         if (norph > 0) {
             int32_t *bd0 = (int32_t *)malloc((size_t)norph * sizeof(int32_t));
             int32_t *bi0 = (int32_t *)malloc((size_t)norph * sizeof(int32_t));
             uint8_t *ab0 = (uint8_t *)calloc((size_t)norph, 1);
             sv_work_t w3 = {0,0,0,0};
-            sv_s3_absorb(orph_seqs, orph_lens, norph, (const char *const *)s2.cons, cons_lens, K,
-                         tau_abs, sig_abs, SV_N_ITER_S3, anchor_occ, bd0, bi0, ab0, &w3);
-            ec_s3_stats_t st;
-            ec_s3_resolve(orph_seqs, orph_lens, norph, peq, (const char *const *)s2.cons, cons_lens, K,
-                          lab4, &edges, keep, c_post, tau_abs, bd0, bi0, bi, absorbed, &st);
+            sv_s4_absorb(orph_seqs, orph_lens, norph, (const char *const *)s2.cons, cons_lens, K,
+                         tau_abs, sig_abs, SV_N_ITER_S4, anchor_occ, bd0, bi0, ab0, &w3);
+            ec_s4_stats_t st;
+            ec_s4_resolve(orph_seqs, orph_lens, norph, peq, (const char *const *)s2.cons, cons_lens, K,
+                          lab3, &edges, keep, c_post, tau_abs, bd0, bi0, bi, absorbed, &st);
             for (int32_t k = 0; k < norph; k++) bd[k] = bd0[k];
             if (vb_flag) {
                 int64_t na = 0; for (int32_t k = 0; k < norph; k++) na += absorbed[k];
-                fprintf(stderr, "S3: %lld of %d orphans absorbed at tau_abs=%d; %lld proven by 2d < %d, "
+                fprintf(stderr, "S4: %lld of %d orphans absorbed at tau_abs=%d; %lld proven by 2d < %d, "
                         "%lld checked against neighbours, %lld full scans; %lld moved to another component, "
                         "%lld found only by the exact check, %lld left alone on a tie\n",
                         (long long)na, norph, tau_abs, (long long)st.fast, c_post, (long long)st.local,
@@ -414,11 +415,11 @@ int main(int argc, char **argv) {
         for (int32_t k = 0; k < K; k++) ec_peq_free(&peq[k]);
         free(peq); free(hist); ec_edges_free(&edges);
     } else {
-        /* ---- v1.1 path (also used past --exact-max) */
+        /* ---- filtered path: --approx, or more cores than --exact-max */
         if (auto_flag && K > 0) {
             int32_t tau_out = -1, ceiling_out = -1;
             cal_diagnostics_t dg;
-            cal_auto_tau((const char *const *)s2.cons, cons_lens, K, margin, SV_N_ITER_S3, sig_abs,
+            cal_auto_tau((const char *const *)s2.cons, cons_lens, K, margin, SV_N_ITER_S4, sig_abs,
                          &tau_out, &ceiling_out, &dg);
             if (hist_path && dg.hist) {
                 FILE *fh = fopen(hist_path, "w");
@@ -444,15 +445,15 @@ int main(int argc, char **argv) {
         }
         sv_work_t w3 = {0,0,0,0};
         if (norph > 0 && K > 0)
-            sv_s3_absorb(orph_seqs, orph_lens, norph, (const char *const *)s2.cons, cons_lens, K,
-                         tau_abs, sig_abs, SV_N_ITER_S3, anchor_occ, bd, bi, absorbed, &w3);
+            sv_s4_absorb(orph_seqs, orph_lens, norph, (const char *const *)s2.cons, cons_lens, K,
+                         tau_abs, sig_abs, SV_N_ITER_S4, anchor_occ, bd, bi, absorbed, &w3);
         sv_work_t w4 = {0,0,0,0};
         if (K > 0)
-            sv_s4_merge_cons((const char *const *)s2.cons, cons_lens, K, tau_cons, sig_abs, SV_N_ITER_S4, lab4, &w4);
+            sv_s3_merge_cons((const char *const *)s2.cons, cons_lens, K, tau_cons, sig_abs, SV_N_ITER_S3, lab3, &w4);
     }
 
     int32_t *final_lab = (int32_t *)malloc((size_t)n * sizeof(int32_t));
-    sv_assemble(&cores, orph_idx, norph, bi, absorbed, lab4, n, final_lab);
+    sv_assemble(&cores, orph_idx, norph, bi, absorbed, lab3, n, final_lab);
 
     int32_t *canon = (int32_t *)malloc((size_t)n * sizeof(int32_t));
     sv_canonical_partition(final_lab, seqs_c, n, canon);
@@ -470,7 +471,7 @@ int main(int argc, char **argv) {
 
     free(seqs_c); free(lab1); free(orph_idx);
     free(orph_seqs); free(orph_lens); free(cons_lens);
-    free(bd); free(bi); free(absorbed); free(lab4); free(final_lab); free(canon);
+    free(bd); free(bi); free(absorbed); free(lab3); free(final_lab); free(canon);
     sv_core_list_free(&cores);
     sv_s2_result_free(&s2);
     sv_out_free_unique(&uniq);

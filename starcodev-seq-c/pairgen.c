@@ -254,7 +254,7 @@ void pg_candidate_pairs(const uint64_t *keys, int32_t n, int32_t cap,
     free(ks);
 }
 
-/* ---------------------------------------------------------------- multi-occurrence keys (v2) */
+/* ---------------------------------------------------------------- multi-occurrence keys */
 int64_t pg_anchor_keys_multi(const pg_encoded_t *enc, int32_t it, int32_t max_occ,
                              uint64_t *keys_out, int32_t *owner_out) {
     int32_t n = enc->n, maxlen = enc->maxlen, glen = enc->glen;

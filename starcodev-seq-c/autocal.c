@@ -1,6 +1,5 @@
 /*
-** autocal.c -- see autocal.h for what the gap rule does and why the earlier
-** longest-gap rule was replaced.
+** autocal.c -- see autocal.h for the gap rule and how tau follows from it.
 */
 #include "autocal.h"
 #include "pairgen.h"
@@ -119,26 +118,6 @@ int cal_distance_histogram(const char *const *cons, const int32_t *cons_lens, in
     pg_free_encoded(&enc);
     return 1;
 }
-
-int cal_longest_gap(const int64_t *hist, int32_t dmax,
-                     int32_t *gap_start_out, int32_t *gap_len_out) {
-    int32_t best_len = 0, best_start = -1;
-    int32_t d = 1;
-    while (d <= dmax) {
-        if (hist[d] == 0) {
-            int32_t st = d;
-            while (d <= dmax && hist[d] == 0) d++;
-            if (d - st > best_len) { best_len = d - st; best_start = st; }
-        } else {
-            d++;
-        }
-    }
-    if (best_start < 0) return 0;
-    *gap_start_out = best_start;
-    *gap_len_out = best_len;
-    return 1;
-}
-
 
 int cal_ceiling_below_peak(const int64_t *hist, int32_t dmax, int32_t min_gap,
                             int32_t *peak_out, int32_t *gap_start_out, int32_t *gap_len_out,

@@ -1,15 +1,24 @@
 /*
-** starcodev.h -- StarcodeV Stage 1-4, union-find, canonical partition.
+** starcodev.h -- StarcodeV stages S1 to S4, union-find, canonical partition.
 **
-** Structurally equivalent to src/starcode.c/.h from the original Starcode
-** (gui11aume/starcode v1.4) -- see CONVENTIONS_STARCODEV.md. Candidate-pair generation is delegated
-** to pairgen.c/h (our replacement for trie.c/h).
+**   S1  exact cores: connected components of the read graph at d <= 8
+**   S2  one consensus sequence per core (medoid frame + column vote)
+**   S3  consensus merge: union-find over consensus pairs within tau_cons
+**   S4  orphan absorption: a read left alone by S1 joins the cluster of its
+**       nearest consensus within tau_abs
 **
-** The restrictions from §4.2 of the StarcodeV design doc apply across this
-** whole module: no runtime RNG, no floating-point reduction on any
-** decision path, no order-dependent accumulators, no dependency on input
-** ordering. The canonical tie-breakers K1-K5 are documented next to each
-** function that uses them.
+** The exact versions of S3 and S4, and the distance histogram H that runs
+** between S2 and S3, live in exactcons.c. This file holds the filtered
+** candidate searches and the stages that work on reads.
+**
+** Structurally equivalent to src/starcode.c/.h of Starcode
+** (gui11aume/starcode v1.4), see CONVENTIONS_STARCODEV.md. Candidate pairs
+** come from pairgen.c/h, which takes the place of trie.c/h.
+**
+** Rules for the whole module: no runtime RNG, no floating-point value on a
+** decision path, no accumulator whose result depends on visiting order, no
+** dependency on input order. The tie-breakers K1-K5 are documented next to
+** the functions that use them.
 */
 #ifndef _STARCODEV_HEADER
 #define _STARCODEV_HEADER
@@ -18,18 +27,19 @@
 #include <stddef.h>
 
 /* ---------------------------------------------------------------- constants
-** Values were calibrated on the Microsoft clustered-nanopore data (see
-** VALIDATION_v2.md and AUTOTAU_REVISION.md). */
+** Defaults chosen on the Microsoft clustered-nanopore data (see
+** VALIDATION.md). tau_abs and tau_cons are lowered automatically when the
+** measured ceiling C is not above them (see main-starcodev.c). */
 #define SV_TAU_CORE   8     /* Starcode's own semantics, fixed (trie.h:52) */
-#define SV_TAU_ABS    16    /* orphan-absorption threshold (S3), default; tau_auto() can override */
-#define SV_TAU_CONS   20    /* consensus-merge threshold (S4), default; tau_auto() can override */
-#define SV_SIG_ABS    96    /* Hamming pre-filter threshold for S3/S4 */
+#define SV_TAU_ABS    16    /* orphan-absorption threshold (S4), default */
+#define SV_TAU_CONS   20    /* consensus-merge threshold (S3), default */
+#define SV_SIG_ABS    96    /* Hamming pre-filter threshold for the S3/S4 candidate searches */
 #define SV_THETA_LOW  40
 #define SV_THETA_HIGH 60    /* Hamming pre-filter threshold for S1 */
-#define SV_N_ITER_S1  64    /* calibrated: 100% edge recall on the 300-block subsample */
-#define SV_N_ITER_S3  96
-#define SV_N_ITER_S4  96
-#define SV_M_MAX      64    /* medoid cost cap (§3.2) */
+#define SV_N_ITER_S1  64    /* S1 rounds, one anchor per round */
+#define SV_N_ITER_S3  96    /* rounds of the filtered S3 search (--approx) */
+#define SV_N_ITER_S4  96    /* rounds of the S4 candidate search */
+#define SV_M_MAX      64    /* medoid cost cap: at most this many members enter the pairwise sums */
 
 /* ---------------------------------------------------------------- union-find */
 typedef struct {
@@ -39,7 +49,7 @@ typedef struct {
 
 void sv_uf_init(sv_uf_t *uf, int32_t n);
 int32_t sv_uf_find(sv_uf_t *uf, int32_t x);
-/* Returns 1 if the two components were actually merged (previously distinct). */
+/* Returns 1 if a and b were in different components and are now joined. */
 int sv_uf_union(sv_uf_t *uf, int32_t a, int32_t b);
 /* out must be allocated by the caller, sized uf->n. */
 void sv_uf_labels(sv_uf_t *uf, int32_t *out);
@@ -69,7 +79,7 @@ typedef struct {
 
 /* ---------------------------------------------------------------- STAGE 1: exact cores
 ** lab_out: size n, raw (NOT canonical) union-find label per read.
-** anchor_occ: keys per read per iteration (1 = v1 behaviour, see pairgen.h).
+** anchor_occ: keys per read per round, one per occurrence of the anchor (see pairgen.h).
 ** iters_done_out: number of iterations actually run. */
 void sv_s1_cores(const char *const *seqs, const int32_t *lens, int32_t n,
                   int32_t tau_core, int32_t n_iter, int32_t theta, int32_t anchor_occ,
@@ -103,18 +113,22 @@ void sv_s2_consensus(const sv_core_list_t *cores, const char *const *seqs,
                       sv_s2_result_t *out);
 void sv_s2_result_free(sv_s2_result_t *r);
 
-/* ---------------------------------------------------------------- STAGE 3: orphan absorption
+/* ---------------------------------------------------------------- STAGE 4: orphan absorption, candidate search
+** Filtered search for the nearest consensus of each orphan within tau_abs.
+** In the default mode its picks are then checked by ec_s4_resolve().
 ** bd_out/bi_out/absorbed_out: size norph. bi_out holds the (local, 0-based)
-** consensus index, or -1 if not absorbed. */
-void sv_s3_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_t norph,
+** consensus index, or -1 if nothing was found. */
+void sv_s4_absorb(const char *const *orph_seqs, const int32_t *orph_lens, int32_t norph,
                    const char *const *cons, const int32_t *cons_lens, int32_t ncons,
                    int32_t tau_abs, int32_t sig_abs, int32_t n_iter, int32_t anchor_occ,
                    int32_t *bd_out, int32_t *bi_out, uint8_t *absorbed_out,
                    sv_work_t *work_out);
 
-/* ---------------------------------------------------------------- STAGE 4: consensus merge
+/* ---------------------------------------------------------------- STAGE 3: consensus merge, filtered (--approx)
+** Union-find over the candidate consensus pairs within tau_cons. The default
+** mode uses the exact ec_s3_merge() instead.
 ** lab_out: size ncons, raw (not yet canonical) union-find label. */
-void sv_s4_merge_cons(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
+void sv_s3_merge_cons(const char *const *cons, const int32_t *cons_lens, int32_t ncons,
                        int32_t tau_cons, int32_t sig_abs, int32_t n_iter,
                        int32_t *lab_out, sv_work_t *work_out);
 
@@ -123,8 +137,8 @@ void sv_s4_merge_cons(const char *const *cons, const int32_t *cons_lens, int32_t
 ** sv_canonical_partition() if you need the canonical form). */
 void sv_assemble(const sv_core_list_t *cores,
                   const int32_t *orph_idx, int32_t norph,
-                  const int32_t *bi3, const uint8_t *absorbed,
-                  const int32_t *lab_s4, int32_t n_reads,
+                  const int32_t *bi4, const uint8_t *absorbed,
+                  const int32_t *lab_s3, int32_t n_reads,
                   int32_t *out);
 
 /* ---------------------------------------------------------------- Levenshtein helper

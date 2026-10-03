@@ -27,7 +27,7 @@
 ** StarcodeV only has a connected-components-equivalent algorithm
 ** (union-find), so we reproduce the lines above exactly for
 ** default/print-clusters/seq-id mode. StarcodeV's --tidy is driven by the
-** same S1-S4 assembled labels (not message-passing like that last example
+** labels assembled after S4 (not message-passing like that last example
 ** above) -- the line format (read<TAB>centroid) stays identical, only the
 ** underlying clustering values come from a different algorithm. This is
 ** documented in CONVENTIONS_STARCODEV.md §5.

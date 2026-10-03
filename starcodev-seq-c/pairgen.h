@@ -1,19 +1,16 @@
 /*
-** pairgen.h -- StarcodeV's candidate-pair generator (anchor-hash + signature).
+** pairgen.h -- StarcodeV's candidate-pair generator (anchor hash + signature).
 **
-** Replaces the role of src/trie.c and src/trie.h from the original
-** Starcode (gui11aume/starcode v1.4). See CONVENTIONS_STARCODEV.md §2 for
-** the rationale behind the replacement: a trie answers "which strings are
-** within radius tau of X?" via a sequential, node-by-node tree walk; this
-** module answers the same question with deterministic anchor hashing plus
-** a q-gram signature pre-filter, whose unit of work (hash one string,
-** compare one pair) is independent across strings/pairs, so it can also be
-** run in parallel.
+** Takes the role of src/trie.c and src/trie.h in Starcode
+** (gui11aume/starcode v1.4); CONVENTIONS_STARCODEV.md §2 explains why. A trie
+** answers "which strings are within radius tau of X?" with a node-by-node
+** tree walk. This module answers it with anchor hashing plus a q-gram
+** signature pre-filter, and every unit of work (hash one string, compare one
+** pair) is independent of the others, so it can also run in parallel.
 **
-** Contents: encode, signatures, anchor_bucket, candidate_pairs. The restrictions from §4.2 of the StarcodeV design doc
-** apply here too: no runtime RNG (the anchor table comes from a fixed LCG
-** constant, computed once), no floating-point reduction, no dependency on
-** input order.
+** Contents: encode, signatures, anchor keys, candidate pairs. No runtime RNG
+** (the anchor table comes from fixed LCG constants, computed once), no
+** floating point, no dependency on input order.
 */
 #ifndef _PAIRGEN_HEADER
 #define _PAIRGEN_HEADER
@@ -22,7 +19,7 @@
 #include <stddef.h>
 
 /* ---------------------------------------------------------------- constants */
-#define PG_W_ANCHOR   4        /* anchor length (StarcodeV design doc §7) */
+#define PG_W_ANCHOR   4        /* anchor length */
 #define PG_L_HASH     6        /* number of bases hashed after the anchor */
 #define PG_Q_SIG      3        /* q-gram signature length */
 #define PG_SIG_BLOCK  22       /* position-block width for signature blocking */
@@ -81,13 +78,12 @@ void pg_anchor_bucket(const pg_encoded_t *enc, int32_t it, uint64_t *keys_out);
 void pg_candidate_pairs(const uint64_t *keys, int32_t n, int32_t cap,
                          pg_pairlist_t *out);
 
-/* v2: one key per occurrence of the anchor instead of only the first one.
-** An indel right after the first occurrence changes its key, but a later
-** occurrence past the indel can still match (read 5335 vs its own
-** consensus is exactly this case). keys_out/owner_out need room for
-** n * max_occ entries. Strings without the anchor emit nothing. Returns the
-** number of keys written. With max_occ = 1 the candidate pairs are the
-** same as pg_anchor_bucket + pg_candidate_pairs. */
+/* One key per occurrence of the anchor, up to max_occ occurrences per
+** string. An indel right after one occurrence changes that key, but a
+** later occurrence past the indel can still match, so the pair is not lost.
+** keys_out/owner_out need room for n * max_occ entries. Strings without the
+** anchor emit nothing. Returns the number of keys written. With max_occ = 1
+** the candidate pairs are the same as pg_anchor_bucket + pg_candidate_pairs. */
 int64_t pg_anchor_keys_multi(const pg_encoded_t *enc, int32_t it, int32_t max_occ,
                              uint64_t *keys_out, int32_t *owner_out);
 
